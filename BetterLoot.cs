@@ -21,7 +21,7 @@ using Oxide.Plugins.BetterLootExtensions;
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.1.1")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.1.3")]
     [Description("A light loot container modification system with rarity support | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -372,6 +372,8 @@ namespace Oxide.Plugins
                 BlueprintWeights.Clear();
                 TotalItemWeights.Clear();
                 TotalBlueprintWeights.Clear();
+
+                BuildWeaponInfoCache();
             }
 
             // Load container data
@@ -397,15 +399,8 @@ namespace Oxide.Plugins
             // Static BetterLoot instance
             _instance = null;
 
-            // Change this to a local list to track HammerHitLootCycle or change to Coroutine
-            var gameObjects = UnityEngine.Object.FindObjectsOfType<HammerHitLootCycle>().ToList();
-
-            if (gameObjects.Any())
-            {
-                foreach (var objects in gameObjects)
-                    if (objects is not null)
-                        UnityEngine.Object.Destroy(objects);
-            }
+            foreach(HammerHitLootCycle hhlc in UnityEngine.Object.FindObjectsByType<HammerHitLootCycle>(FindObjectsInactive.Include, FindObjectsSortMode.None).Where(i => i is not null))
+                UnityEngine.Object.Destroy(hhlc);
         }
         #endregion
         
@@ -630,6 +625,9 @@ namespace Oxide.Plugins
                     _instance?.SendMessage(msgPlayer, restoredMessage);
                 else
                     Log(restoredMessage);
+
+                if (restoreMode)
+                    _instance.InitLootSystem(true);
             }
             #endregion
 
@@ -894,8 +892,7 @@ namespace Oxide.Plugins
                 entry.Value.Amount.CreateBonusItems(ref bonusItems);
 
                 // Select Amount
-                int _min = entry.Value.Amount.Min, _max = entry.Value.Amount.Max;
-                int amount = UnityEngine.Random.Range(Math.Min(_min, _max), Math.Max(_min, _max) + 1);
+                int amount = GetRNG(entry.Value.Amount.Min, entry.Value.Amount.Max);
 
                 // Get Custom Properties
                 ulong skinId = entry.Value.Amount.SkinId;
@@ -948,7 +945,7 @@ namespace Oxide.Plugins
                     return;
 
                 // Recursively apply
-                int total = Math.Clamp(UnityEngine.Random.Range(ItemEntryModifications.AttachmentSettings.minModAmount, ItemEntryModifications.AttachmentSettings.maxModAmount + 1), 1, ItemEntryModifications.maxMods);
+                int total = Math.Clamp(GetRNG(ItemEntryModifications.AttachmentSettings.minModAmount, ItemEntryModifications.AttachmentSettings.maxModAmount), 1, ItemEntryModifications.maxMods);
                 for (int i = 0; i < total; i++)
                 {
                     for (int r = 0; r < 5; r++)
@@ -977,7 +974,7 @@ namespace Oxide.Plugins
                 if (ammoSettings.CanHoldMultipleAmmoUnits)
                 {
                     ammoDef = ItemManager.FindDefinitionByPartialName(ammoSettings.AmmoItemShortname);
-                    ammoAmount = Math.Clamp(UnityEngine.Random.Range(ammoSettings.Min, ammoSettings.Max + 1), 0, ammoSettings.MaxAmmo);
+                    ammoAmount = Math.Clamp(GetRNG(ammoSettings.Min, ammoSettings.Max), 0, ammoSettings.MaxAmmo);
 
                     if (item.contents?.itemList.Any(x => x.info.shortname.Equals("weapon.mod.extendedmags")) ?? false)
                         ammoAmount = (int)Math.Ceiling(ammoAmount * 1.25);
@@ -1178,8 +1175,10 @@ namespace Oxide.Plugins
                 }
 
                 if (entry.Value.Durability is not null)
-                    item.condition = UnityEngine.Random.Range(Math.Max(0, entry.Value.Durability.MinDurability), Math.Min(item.maxCondition, entry.Value.Durability.MaxDurability));
+                    item.ChangeConditionPercentage(GetRNG(entry.Value.Durability.MinDurability, entry.Value.Durability.MaxDurability));
 
+                item.OnVirginSpawn();
+                
                 return item;
             }
             #endregion
@@ -1209,15 +1208,15 @@ namespace Oxide.Plugins
                 foreach (var bonusItemEntry in additionalItems)
                 {
                     var _bonusItemEntry = bonusItemEntry.Value;
-                    Item bonusItem = ItemManager.CreateByName(bonusItemEntry.Key, UnityEngine.Random.Range(Math.Min(_bonusItemEntry.Min, _bonusItemEntry.Max + 1), Math.Max(_bonusItemEntry.Min, _bonusItemEntry.Max)) * _config.Loot.LootMultiplier, _bonusItemEntry.SkinId);
-
-                    // Apply durability
-                    if (_bonusItemEntry.DurabilitySettings is not null)
-                        bonusItem.condition = UnityEngine.Random.Range(Math.Max(0, _bonusItemEntry.DurabilitySettings.MinDurability), Math.Min(bonusItem.maxCondition, _bonusItemEntry.DurabilitySettings.MaxDurability));
+                    Item bonusItem = ItemManager.CreateByName(bonusItemEntry.Key, GetRNG(_bonusItemEntry.Min, _bonusItemEntry.Max) * _config.Loot.LootMultiplier, _bonusItemEntry.SkinId);
 
                     // Apply attachments if applicable
                     _bonusItemEntry.ApplyAttachments(bonusItem);
                     _bonusItemEntry.ApplyAmmo(bonusItem);
+
+                    // Apply durability
+                    if (_bonusItemEntry.DurabilitySettings is not null)
+                        bonusItem.ChangeConditionPercentage(GetRNG(_bonusItemEntry.DurabilitySettings.MinDurability, _bonusItemEntry.DurabilitySettings.MaxDurability));
 
                     bonusItem.OnVirginSpawn();
                     bonusItems.Add(bonusItem);
@@ -1230,6 +1229,10 @@ namespace Oxide.Plugins
         #region Util
         private static void Log(string msg, params object[] args) => _instance?.Puts(msg, args);
         private void SendMessage(BasePlayer player, string message, params object[] args) => Player.Reply(player, message, _config.ChatConfig.Prefix, _config.ChatConfig.MessageIcon, args);
+        public static int GetRNG(int min, int max)
+            => min == max ? min : UnityEngine.Random.Range(Math.Min(min, max), Math.Max(min, max) + 1);
+        public static float GetRNG(float min, float max)
+            => min == max ? min : UnityEngine.Random.Range(Math.Min(min, max), Math.Max(min, max));
         #endregion
 
         #region Oxide Hooks
@@ -1404,7 +1407,7 @@ namespace Oxide.Plugins
                         continue;
                     } 
 
-                    if (basePrefab.GetComponent<global::HumanNPC>() is HumanNPC npc)
+                    if (basePrefab.GetComponent<global::HumanNPC>() is global::HumanNPC npc)
                     { // is npc
                         var container = new PrefabLoot();
 
@@ -1727,9 +1730,8 @@ namespace Oxide.Plugins
                 return false;
 
             int lootItemCount = con.ItemCount;
-
             int min = con.ItemSettings.ItemsMin, max = con.ItemSettings.ItemsMax;
-            int itemCount = UnityEngine.Random.Range(Math.Min(min, max), Math.Max(min, max) + 1);
+            int itemCount = GetRNG(Math.Min(min, max), Math.Max(min, max));
             if (lootItemCount > 0 && itemCount > lootItemCount && lootItemCount < 36)
                 itemCount = lootItemCount;
 
@@ -1837,7 +1839,7 @@ namespace Oxide.Plugins
                 con.ItemSettings.MaxScrap = con.ItemSettings.MinScrap;
             } else if (con.ItemSettings.MaxScrap > con.ItemSettings.MinScrap)
             {
-                scrapAmt = UnityEngine.Random.Range(con.ItemSettings.MinScrap, con.ItemSettings.MaxScrap) + 1;
+                scrapAmt = GetRNG(con.ItemSettings.MinScrap, con.ItemSettings.MaxScrap);
             } else
             {
                 scrapAmt = con.ItemSettings.MaxScrap;
@@ -1974,7 +1976,7 @@ namespace Oxide.Plugins
                 Log($"No stacked LootContainer found.");
         }
         
-        private (Item? item, List<Item>? bonusItem) MightyRNG(string type, int itemCount, bool blockBPs = false)
+        private (Item? item, List<Item>? bonusItem)MightyRNG(string type, int itemCount, bool blockBPs = false)
         {
             List<string>? selectFrom = Pool.Get<List<string>>();
             List<Item>? bonusItems = null;
@@ -2053,16 +2055,18 @@ namespace Oxide.Plugins
             if (lootTables.LootTables.TryGetValue(type, out PrefabLoot? entry) && entry.UngroupedItems.TryGetValue(itemEntryName, out LootEntry lootEntry))
             {
                 // Apply custom properties
-                item.amount = UnityEngine.Random.Range(Math.Min(lootEntry.Min, lootEntry.Max), Math.Max(lootEntry.Min, lootEntry.Max) + 1) * _config.Loot.LootMultiplier;
+                item.amount = GetRNG(Math.Min(lootEntry.Min, lootEntry.Max), Math.Max(lootEntry.Min, lootEntry.Max)) * _config.Loot.LootMultiplier;
                 item.skin = lootEntry.SkinId;
 
-                // Apply durability
-                if (lootEntry.DurabilitySettings is LootEntryDurability durabilitySettings)
-                    item.condition = UnityEngine.Random.Range(Math.Max(0, durabilitySettings.MinDurability), Math.Min(item.maxCondition, durabilitySettings.MaxDurability));
-                
                 lootEntry?.ApplyAttachments(item); // Apply attachments to main item
                 lootEntry?.ApplyAmmo(item);
                 lootEntry?.CreateBonusItems(ref bonusItems); // Create bonus items and apply attachments
+
+                // Apply durability
+                if (lootEntry.DurabilitySettings is LootEntryDurability durabilitySettings)
+                    item.ChangeConditionPercentage(GetRNG(durabilitySettings.MinDurability, durabilitySettings.MaxDurability));
+                else 
+                    item.MarkDirty();
             }
 
             item.OnVirginSpawn();
@@ -2413,6 +2417,9 @@ namespace Oxide.Plugins.BetterLootExtensions
 {
     public static class BetterLootExtensions
     {
+        public static void ChangeConditionPercentage(this Item item, int conditionPercentage)
+            => item.condition = (conditionPercentage / 100f) * item.maxCondition;
+
         public static bool ContainsPartial(this List<string> list, string partialString)
             => list.Any(partialString.Contains);
         public static bool IsDefault<T>(this T obj)
