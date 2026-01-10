@@ -21,7 +21,7 @@ using Oxide.Plugins.BetterLootExtensions;
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.1.3")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.1.4")]
     [Description("A light loot container modification system with rarity support | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -900,7 +900,8 @@ namespace Oxide.Plugins
 
                 // Create Item
                 Item item = ItemManager.CreateByPartialName(UniqueTagREGEX.Replace(entry.Key, string.Empty), amount);
-                item.name = customName ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(customName))
+                    item.name = customName;
                 item.skin = skinId;
 
                 entry.Value.Amount.ApplyAttachments(item);
@@ -2056,6 +2057,8 @@ namespace Oxide.Plugins
             {
                 // Apply custom properties
                 item.amount = GetRNG(Math.Min(lootEntry.Min, lootEntry.Max), Math.Max(lootEntry.Min, lootEntry.Max)) * _config.Loot.LootMultiplier;
+                if (!string.IsNullOrWhiteSpace(lootEntry.DisplayName))
+                    item.name = lootEntry.DisplayName;
                 item.skin = lootEntry.SkinId;
 
                 lootEntry?.ApplyAttachments(item); // Apply attachments to main item
