@@ -17,11 +17,12 @@ using System.Collections.Generic;
 using System.Runtime.Serialization;
 using System.Text.RegularExpressions;
 using Oxide.Plugins.BetterLootExtensions;
+using UnityEngine.Analytics;
 
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.1.4")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.1.5")]
     [Description("A light loot container modification system with rarity support | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -724,6 +725,9 @@ namespace Oxide.Plugins
             [JsonProperty("Loot Profiles", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<LootProfileImport> LootProfiles;
 
+            [JsonProperty("Guaranteed Items")]
+            public Dictionary<string, LootEntrySettings> GuaranteedItems = new Dictionary<string, LootEntrySettings>();
+
             [JsonProperty("Ungrouped Items")]
             public Dictionary<string, LootEntry> UngroupedItems;
 
@@ -825,6 +829,9 @@ namespace Oxide.Plugins
         {
             [JsonProperty("Enabled?")]
             public bool Enabled = true;
+
+            [JsonProperty("Guaranteed Items")]
+            public Dictionary<string, LootEntrySettings> GuaranteedItems = new Dictionary<string, LootEntrySettings>();
 
             [JsonProperty("Item List")]
             public Dictionary<string, LootRNG> ItemList;
@@ -980,7 +987,7 @@ namespace Oxide.Plugins
                     if (item.contents?.itemList.Any(x => x.info.shortname.Equals("weapon.mod.extendedmags")) ?? false)
                         ammoAmount = (int)Math.Ceiling(ammoAmount * 1.25);
                 }
-                else if (UnityEngine.Random.Range(0, 100f) <= ammoSettings.Probability)
+                else if (GetRNG(0, 100) <= ammoSettings.Probability)
                 {
                     ammoDef = ItemManager.FindDefinitionByPartialName(ammoSettings.AmmoItemShortname);
                 }
@@ -1191,7 +1198,7 @@ namespace Oxide.Plugins
             // Set at top level class to foce only having bonus items at this level and not nested levels.
             [JsonProperty("Bonus Items", Order = 7)] // Forcing field to bottom
             public Dictionary<string, LootEntrySettings> additionalItems = new Dictionary<string, LootEntrySettings>();
-
+            
             public LootEntry(int Min, int Max)
             {
                 this.Min = Min;    
@@ -1585,11 +1592,14 @@ namespace Oxide.Plugins
                 {
                     scanEntry(entry.Key, entry.Value.Amount, lootProfile.Key, ref modifiedLootGroups);
 
-                    if (entry.Value.Amount.additionalItems?.Any() ?? false)
-                        foreach (var bonusItem in entry.Value.Amount.additionalItems)
-                            scanEntry(bonusItem.Key, bonusItem.Value, lootProfile.Key, ref modifiedLootGroups);
+                    foreach (var bonusItem in entry.Value.Amount.additionalItems)
+                        scanEntry(bonusItem.Key, bonusItem.Value, lootProfile.Key, ref modifiedLootGroups);                    
                 }
+
+                foreach (var bonusItem in lootProfile.Value.GuaranteedItems)
+                    scanEntry(bonusItem.Key, bonusItem.Value, lootProfile.Key, ref modifiedLootGroups);
             }
+
 
             // Build entries for loot tables
             int activeTypes = 0;
@@ -1623,6 +1633,11 @@ namespace Oxide.Plugins
                     Blueprints[lootTable.Key][i] = new List<string>();
                 }
 
+                // Scan guaranteed items
+                foreach(var itemEntry in container.GuaranteedItems)
+                    scanEntry(itemEntry.Key, itemEntry.Value, lootTable.Key, ref modifiedLootTables);
+
+                // Scan ungrouped items
                 foreach (var itemEntry in container.UngroupedItems)
                 {
                     #region Entry Internal Flag Mapping
@@ -1742,6 +1757,9 @@ namespace Oxide.Plugins
             List<string> itemNames = Pool.Get<List<string>>();
             List<Item> items = Pool.Get<List<Item>>();
             List<int> itemBlueprints = Pool.Get<List<int>>();
+            List<KeyValuePair<string, LootEntrySettings>> guaranteedItemEntries = Pool.Get<List<KeyValuePair<string, LootEntrySettings>>>();
+
+            guaranteedItemEntries.AddRange(con.GuaranteedItems);
 
             int maxRetry = 10;
             for (int i = 0; i < itemCount; ++i)
@@ -1751,8 +1769,11 @@ namespace Oxide.Plugins
 
                 Item? item = null;
                 List<Item>? bonusItems = null;
+                List<KeyValuePair<string, LootEntrySettings>> _guaranteedItemEntries = Pool.Get<List<KeyValuePair<string, LootEntrySettings>>>();
+
                 bool isLootGroupItem = false;
 
+                // TODO bitwise search for larger indexes
                 foreach (var import in con.LootProfiles)
                 {
                     if (!import.Enabled)
@@ -1769,7 +1790,7 @@ namespace Oxide.Plugins
                     // RNG => Use Profile
                     double rng_pr = RNG.NextDouble() * 1e2;
 
-                    // RNG Check Failed
+                    // RNG Check Failed, profile not used / skipped to next
                     if (rng_pr > import.LootProfileProbability)
                         continue;
 
@@ -1781,7 +1802,11 @@ namespace Oxide.Plugins
                     (item, bonusItems) = profile.GetItem();
 
                     if (item != null)
+                    {
+                        // Add all guarenteed items from profile (if profile selected use all items regardless)
+                        _guaranteedItemEntries.AddRange(profile.GuaranteedItems);
                         isLootGroupItem = true;
+                    }
                 }
 
                 // Loot import not used, generate from ungrouped items with default rng system
@@ -1827,12 +1852,25 @@ namespace Oxide.Plugins
                 if (bonusItems is not null)
                     foreach (Item bonusItem in bonusItems.Where(x => !duplicatePredicate(x, true)))
                         items.Add(bonusItem);
+
+                guaranteedItemEntries.AddRange(_guaranteedItemEntries);
+                
+                Pool.FreeUnmanaged(ref _guaranteedItemEntries);
             }
 
-            foreach (var item in items.Where(x => x != null && x.IsValid()))
-                if (!item.MoveToContainer(container, -1, true)) // broken item fix / fixes full container 
-                    item.DoRemove();
-            
+            foreach (var gItemEntry in guaranteedItemEntries)
+            {
+                // Spawn item. No rng, just spawn em.
+                Item gItem = ItemManager.CreateByPartialName(gItemEntry.Key, GetRNG(gItemEntry.Value.Min, gItemEntry.Value.Max), gItemEntry.Value.SkinId);
+                if (gItem is null)
+                    continue;
+
+                if (gItemEntry.Value.DurabilitySettings is LootEntryDurability durability)
+                    gItem.ChangeConditionPercentage(GetRNG(durability.MinDurability, durability.MaxDurability));
+
+                items.Add(gItem);
+            }
+
             int scrapAmt = 0;
             if (con.ItemSettings.MinScrap > con.ItemSettings.MaxScrap)
             { // Lower max to min
@@ -1845,6 +1883,11 @@ namespace Oxide.Plugins
             {
                 scrapAmt = con.ItemSettings.MaxScrap;
             }
+
+            items.Shuffle((uint)UnityEngine.Random.Range(0, 1000));
+            foreach (var item in items.Where(x => x != null && x.IsValid()))
+                if (!item.MoveToContainer(container)) // broken item fix / fixes full container 
+                    item.DoRemove();
 
             // Add scrap
             if (scrapAmt > 0)
@@ -1860,6 +1903,7 @@ namespace Oxide.Plugins
             Pool.FreeUnmanaged(ref items);
             Pool.FreeUnmanaged(ref itemNames);
             Pool.FreeUnmanaged(ref itemBlueprints);
+            Pool.FreeUnmanaged(ref guaranteedItemEntries);
 
             return true;
         }
@@ -2057,9 +2101,10 @@ namespace Oxide.Plugins
             {
                 // Apply custom properties
                 item.amount = GetRNG(Math.Min(lootEntry.Min, lootEntry.Max), Math.Max(lootEntry.Min, lootEntry.Max)) * _config.Loot.LootMultiplier;
+                item.skin = lootEntry.SkinId;
+
                 if (!string.IsNullOrWhiteSpace(lootEntry.DisplayName))
                     item.name = lootEntry.DisplayName;
-                item.skin = lootEntry.SkinId;
 
                 lootEntry?.ApplyAttachments(item); // Apply attachments to main item
                 lootEntry?.ApplyAmmo(item);
