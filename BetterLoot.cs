@@ -1,8 +1,8 @@
 using System;
 using System.IO;
 using Oxide.Core;
-using System.Linq;
 using System.Data;
+using System.Linq;
 using UnityEngine;
 using Newtonsoft.Json;
 using Facepunch.Extend;
@@ -17,12 +17,10 @@ using System.Collections.Generic;
 using System.Runtime.Serialization;
 using System.Text.RegularExpressions;
 using Oxide.Plugins.BetterLootExtensions;
-using UnityEngine.Analytics;
-
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.1.5")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.1.6")]
     [Description("A light loot container modification system with rarity support | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -47,15 +45,6 @@ namespace Oxide.Plugins
         private Dictionary<string, int[]> BlueprintWeights = new Dictionary<string, int[]>(); // Blueprint weights for each container
         private Dictionary<string, int> TotalItemWeights = new Dictionary<string, int>(); // Total sum of item weights for each container
         private Dictionary<string, int> TotalBlueprintWeights = new Dictionary<string, int>(); // Total sum of blueprint weights for each container
-        /// <summary>
-        /// Used for when a npc dies that we can check their prefab type and then use that to populate their loot drop.
-        /// This has to be done to avoid issues with overhead of directly modifying loot slots (which would have to be restored on unload if anyone wanted to modify them
-        /// without having to respawn the npc entity)
-        /// 
-        /// The userid is stored as the SteamID on the NPC corpse, so this can be used to do a reverse check to see what the entity was. When we know the prefab
-        /// we can pull the loot table profile and generate our loot to replace the vanilla generated loot.
-        /// </summary>
-        private Dictionary<string, List<ulong>> NPCLootMonitor = new Dictionary<string, List<ulong>>(); // NPC Prefab : Currently Spawned Ent IDs
 
         #region Info Caching
         private Dictionary<string, WI_Cache>? WeaponInfoCache; // Item info for building table 
@@ -592,9 +581,14 @@ namespace Oxide.Plugins
             #region DataFile Error Backup
             public static void BakDataFile(string filename, bool restoreMode = false, BasePlayer? msgPlayer = null)
             {
+                // Move these to lang
+                const string NoRestoreFileFound = "No backup file to restore.";
+                const string NoMainFileFound = "No file found to move to backup, skipping file.";
+                const string FileRestored = "Backup restored";
+
                 bool sendPlayer = msgPlayer is not null;
-                string notifyMessage = string.Format(restoreMode ? "Restoring backup of {0}" : "Created backup of datafile {0}", $"{filename}.json");
-                
+                string notifyMessage = string.Format(restoreMode ? "Restoring backup of {0}" : "Attempting to create backup of datafile {0}", $"{filename}.json");
+
                 if (sendPlayer)
                     _instance?.SendMessage(msgPlayer, notifyMessage);
                 else
@@ -611,21 +605,29 @@ namespace Oxide.Plugins
                 }
                 else if (restoreMode)
                 {
-                    const string msg = "No backup file to restore.";
+                    
                     if (sendPlayer)
-                        _instance?.SendMessage(msgPlayer, msg);
+                        _instance?.SendMessage(msgPlayer, NoRestoreFileFound);
                     else
-                        Log(msg);
+                        Log(NoRestoreFileFound);
                     return;
                 }
+                else
+                {
+                    if (sendPlayer)
+                        _instance?.SendMessage(msgPlayer, NoMainFileFound);
+                    else
+                        Log(NoMainFileFound);
+
+                    return;
+                } // Main file does not exist, cannot push to backup
 
                 File.Move(restoreMode ? bakPath : path, existSearchPath);
-                    
-                const string restoredMessage = "Backup restored";
+                
                 if (sendPlayer)
-                    _instance?.SendMessage(msgPlayer, restoredMessage);
+                    _instance?.SendMessage(msgPlayer, FileRestored);
                 else
-                    Log(restoredMessage);
+                    Log(FileRestored);
 
                 if (restoreMode)
                     _instance.InitLootSystem(true);
@@ -1255,22 +1257,8 @@ namespace Oxide.Plugins
             return null;
         }
 
-        private void OnEntitySpawned(NPCPlayerCorpse corpse)
-            => NextTick(() => PopulateContainer(corpse));
-
-        private void OnEntitySpawned(NPCPlayer npc)
-        {
-            string name = npc.name;
-            if (_config.Generic.WatchedPrefabs.Contains(name))
-            {
-                ulong id = npc.userID;
-
-                if (NPCLootMonitor.ContainsKey(name))
-                    NPCLootMonitor[name].Add(id);
-                else
-                    NPCLootMonitor.Add(name, new List<ulong> { id });
-            }
-        }
+        NPCPlayerCorpse? OnCorpsePopulate(BasePlayer npcPlayer, NPCPlayerCorpse corpse)
+            => npcPlayer != null && corpse != null && _config.Generic.WatchedPrefabs.Contains(npcPlayer.PrefabName) && PopulateContainer(npcPlayer.PrefabName, corpse) ? corpse : null;
         #endregion
 
         #region Loot Methods
@@ -1696,39 +1684,21 @@ namespace Oxide.Plugins
 
         #region Core
         // NPC Implementation
-        private bool PopulateContainer(NPCPlayerCorpse npc)
+        private bool PopulateContainer(string prefab, NPCPlayerCorpse npc)
         {
-            if (npc is null || npc.IsDestroyed)
+            if (npc is null || npc.IsDestroyed || (!(npc.containers?.Any() ?? false)) || npc.containers[0] is not ItemContainer inventory)
                 return false;
 
             // API Call
             if (Interface.CallHook("ShouldBLPopulate_NPC", npc.playerSteamID) != null)
                 return false;
 
-            // Reverse search entity for prefab
-            string prefab = string.Empty;
-
-            foreach (var entry in NPCLootMonitor)
-            {
-                if (entry.Value.Contains(npc.playerSteamID))
-                {
-                    prefab = entry.Key;
-                    break;
-                }
-            }
-
-            if (string.IsNullOrEmpty(prefab) || (!(npc.containers?.Any() ?? false)) || npc.containers[0] is not ItemContainer inventory)
-                return false;
-                
             return PopulateContainer(inventory, prefab);
         }
 
         private bool PopulateContainer(LootContainer container)
         {
-            if (container is null) 
-                return false;
-
-            if (Interface.CallHook("ShouldBLPopulate_Container", container.net.ID.Value) != null)
+            if (container is null || Interface.CallHook("ShouldBLPopulate_Container", container.net.ID.Value) != null)
                 return false;
 
             if (container.inventory is null)
@@ -1810,8 +1780,14 @@ namespace Oxide.Plugins
                 }
 
                 // Loot import not used, generate from ungrouped items with default rng system
-                if (item == null)
-                    (item, bonusItems) = MightyRNG(prefab, itemCount, itemBlueprints.Count >= con.ItemSettings.MaxBPs);
+                try
+                {
+                    if (item == null)
+                        (item, bonusItems) = MightyRNG(prefab, itemCount, itemBlueprints.Count >= con.ItemSettings.MaxBPs);
+                } catch (Exception e)
+                {
+                    Puts($"[ERROR]: Failed to generate item for \"{prefab}\". Reason: {e.Message} \n{e.StackTrace}");
+                }
 
                 // No item was generated from either system, attempt to regenerate.
                 if (item == null)
@@ -1937,30 +1913,11 @@ namespace Oxide.Plugins
                             continue;
                         else if (PopulateContainer(lootContainer))
                             populatedContainers++;
-                    } else if (container is NPCPlayerCorpse corpse)
-                    {
-                        if (PopulateContainer(corpse))
-                            populatedNPCContainers++;
                     }
                 }
 
-                // NPC Implementation
-                foreach (var npcContainer in BaseNetworkable.serverEntities.Where(n => n is (not null) and global::HumanNPC).Cast<global::HumanNPC>())
-                {
-                    if (NPCLootMonitor.ContainsKey(npcContainer.name))
-                        NPCLootMonitor[npcContainer.name].Add(npcContainer.userID);
-                    else
-                        NPCLootMonitor.Add(npcContainer.name, new List<ulong> { npcContainer.userID });
-
-                    trackedNPCs++;
-                }
-
                 if (doLog)
-                {
                     Log($"Populated ({populatedContainers}) supported loot containers.");
-                    Log($"Populated ({populatedNPCContainers}) supported npc corpses.");
-                    Log($"Tracking ({trackedNPCs}) spawned NPCs.");
-                }
                     
                 Initialized = true;
                 populatedContainers = 0;
@@ -2406,9 +2363,8 @@ namespace Oxide.Plugins
 
             if (entity is NPCPlayerCorpse npc)
             {
-                container = npc.containers[0];
-                panelName = npc.lootPanelName;
-                isNpc = true;
+                _instance.SendMessage(player, "Cannot rotate loot directly on corpse.");
+                return;
             }
             else if (entity.GetComponent<LootContainer>() is StorageContainer _inv)
             {
@@ -2420,7 +2376,6 @@ namespace Oxide.Plugins
                 
             HammerHitLootCycle lootCycle = entity.gameObject.AddComponent<HammerHitLootCycle>();
 
-            lootCycle.isNpc = isNpc;
             player.inventory.loot.StartLootingEntity(entity, false);
             player.inventory.loot.AddContainer(container);
             player.inventory.loot.SendImmediate();
@@ -2429,8 +2384,6 @@ namespace Oxide.Plugins
 
         private class HammerHitLootCycle : FacepunchBehaviour
         {
-            public bool isNpc = false;
-
             private void Awake()
                 => InvokeRepeating(Repeater, 0, (float)_config.Loot.HammerLootCycleTime);
 
@@ -2439,16 +2392,8 @@ namespace Oxide.Plugins
                 if (!enabled) 
                     return;
 
-                if (isNpc)
-                {
-                    NPCPlayerCorpse corpse = GetComponent<NPCPlayerCorpse>();
-                    _instance.PopulateContainer(corpse);
-                }
-                else
-                {
-                    LootContainer loot = GetComponent<LootContainer>();
-                    _instance.PopulateContainer(loot);
-                }
+                LootContainer loot = GetComponent<LootContainer>();
+                _instance.PopulateContainer(loot);
             }
 
             private void PlayerStoppedLooting(BasePlayer _)
