@@ -17,10 +17,11 @@ using System.Collections.Generic;
 using System.Runtime.Serialization;
 using System.Text.RegularExpressions;
 using Oxide.Plugins.BetterLootExtensions;
+using Rust.Ai.Gen2;
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.1.6")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.1.7")]
     [Description("A light loot container modification system with rarity support | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -33,7 +34,9 @@ namespace Oxide.Plugins
 
         // System States
         private bool Changed = true;
-        private bool Initialized;
+        private static bool NewConfigGenerated;
+        private static bool NewSave;
+        private static bool Initialized;
 
         private static Random? RNG;
         private static Regex? UniqueTagREGEX;
@@ -123,8 +126,27 @@ namespace Oxide.Plugins
             public bool ListUpdatesOnLoad = true;
             [JsonProperty("Remove Stacked Containers")]
             public bool RemoveStackedContainers = true;
+            [JsonProperty("Only update prefab list on wipe day")]
+            public bool OnlyUpdatePrefabListOnWipe = false; // Slightly faster start time. (Doesnt check to regenerate prefab watch list from game manifest every startup).
+            [JsonProperty("Auto enable new prefabs found on wipe")]
+            public bool AutoEnableNewContainers = true;
+            [JsonProperty("Watched Container Prefabs (true = monitor container loot, false = disabled)")]
+            public Dictionary<string, bool> WatchedPrefabs = new ();
+
+            #region v4.1.7 Configuration Migration
             [JsonProperty("Watched Prefabs")]
-            public HashSet<string> WatchedPrefabs = new HashSet<string>();
+            private HashSet<string>? LegacyWatchedPrefabs { set => LegacyMerge_WatchedPrefabs(value); }
+
+            private void LegacyMerge_WatchedPrefabs(IEnumerable<string>? values)
+            {
+                if (values == null)
+                    return;
+
+                foreach (string prefab in values)
+                    if (!string.IsNullOrWhiteSpace(prefab))
+                        WatchedPrefabs.TryAdd(prefab, true);
+            }
+            #endregion
         }
 
         private class LootConfiguration
@@ -140,9 +162,9 @@ namespace Oxide.Plugins
             [JsonProperty("Allow duplicate items")]
             public bool AllowDuplicateItems = false;
             [JsonProperty("Enable logging for item attachments auto balancing operations")]
-            public bool EnableBonusItemsAutoBalanceLogging { get; set; } = false;
+            public bool EnableBonusItemsAutoBalanceLogging = false;
             [JsonProperty("Always allow duplicate items from bonus items list (if set, will override 'Allow duplicate items option')")]
-            public bool AllowBonusItemsDuplicateItems { get; set; } = true;
+            public bool AllowBonusItemsDuplicateItems = true;
         }
 
         private class ChatConfiguration
@@ -163,13 +185,21 @@ namespace Oxide.Plugins
             public bool AllowLootGroupDuplicateItems = true;
         }
 
+        /// <summary>
+        /// As of v4.1.7 this system runs everytime to check for new prefabs as well as maintain the integrity of the current prefab list that is available so it can be enabled / disabled easily at any time.
+        /// This behaviour can optionally be disabled in the config for it to only run on wipe day (to update for any new prefab types after a update)
+        /// </summary>
+        /// <param name="wipeDayBypass"></param>
         private void CheckWatchedPrefabs()
         {
             /* Watched Prefabs Auto-Population */
-            if (_config?.Generic.WatchedPrefabs.Any() ?? false)
+            if (_config.Generic.OnlyUpdatePrefabListOnWipe && !NewSave) // If it is a new wipe new found prefabs will be auto enabled.
                 return;
 
-            Log("Updating watched prefabs from manifest...");
+            NewConfigGenerated = !_config.Generic.WatchedPrefabs.Any();
+
+            if (NewConfigGenerated)
+                Log("Checking for missing viable loot containers in prefab watch list. (Currently disabled containers will stay disabled).");
 
             // Name filtering
             List<string> negativePartialNames = Pool.Get<List<string>>();
@@ -201,10 +231,12 @@ namespace Oxide.Plugins
                     "/spawners",
                     "radtown/desk",
                     "radtown/loot_component_test",
+                    "chinooklockedcrate/chinooklockedcrate", // Specific crate with no spawnable
                     "water_puddles_border_fix" // Weird container prefab from radtown update??
                 }
             );
 
+            // Adding default values
             foreach (GameManifest.PrefabProperties category in GameManifest.Current.prefabProperties)
             {
                 string name = category.name;
@@ -212,15 +244,15 @@ namespace Oxide.Plugins
                 if (!negativePartialNames.ContainsPartial(name) || partialNames.ContainsPartial(name))
                     continue;
 
-                if (!_config.Generic.WatchedPrefabs.Contains(name))
-                    _config.Generic.WatchedPrefabs.Add(name);
+                // Add false by default, may have been disabled by user if was not in list from previous version. If is a new wipe and auto-enable is set, containers will be added as enabled prefabs.
+                _config.Generic.WatchedPrefabs.TryAdd(name, NewConfigGenerated || (NewSave && _config.Generic.AutoEnableNewContainers) ? true : false); 
             }
 
-            SaveConfig();
-
-            Log("Updated configuration with manifest values.");
-
-            AttemptSendLootyLink();
+            if (NewConfigGenerated)
+            {
+                Log("Updated configuration with manifest values.");
+                AttemptSendLootyLink();
+            }
 
             Pool.FreeUnmanaged(ref negativePartialNames);
             Pool.FreeUnmanaged(ref partialNames);
@@ -236,17 +268,13 @@ namespace Oxide.Plugins
             {
                 _config = Config.ReadObject<PluginConfig>();
 
-                if (_config == null)
-                {
-                    Log($"Generating Config File for Better Loot");
-                    throw new JsonException();
-                }
-
                 if (MaybeUpdateConfig(_config))
                 {
                     Log("Configuration appears to be outdated; updating and saving Better Loot");
                     SaveConfig();
                 }
+
+                Log("Loaded configuration!");
             }
             catch (Exception ex)
             {
@@ -328,7 +356,7 @@ namespace Oxide.Plugins
         #endregion
         #endregion
 
-        #region Oxide Loaded / Unload / Server Load 
+        #region Oxide Loaded / Unload / Server Load / New Save
         private void Loaded()
         {
             _instance = this;
@@ -338,12 +366,12 @@ namespace Oxide.Plugins
             DataSystem.LoadBlacklist();
             DataSystem.LoadLootTables();
             DataSystem.LoadLootGroups();
-
-            CheckWatchedPrefabs();
         }
 
         private void OnServerInitialized()
         {
+            CheckWatchedPrefabs(); // Called so OnNewSave can trigger flag
+
             ItemManager.Initialize();
             BuildWeaponInfoCache();
 
@@ -386,12 +414,22 @@ namespace Oxide.Plugins
             lootGroups = null;
             RNG = null;
 
+            // Reset Static Flags
+            NewConfigGenerated = false;
+            NewSave = false;
+            Initialized = false;
+
             // Static BetterLoot instance
             _instance = null;
+            _config = null;
 
             foreach(HammerHitLootCycle hhlc in UnityEngine.Object.FindObjectsByType<HammerHitLootCycle>(FindObjectsInactive.Include, FindObjectsSortMode.None).Where(i => i is not null))
                 UnityEngine.Object.Destroy(hhlc);
         }
+
+        // Set flag so new prefabs can be autoenabled
+        private void OnNewSave(string _)
+            => NewSave = true;
         #endregion
         
         #region DataFile
@@ -800,7 +838,7 @@ namespace Oxide.Plugins
                             MinScrap = LegacyScrap.Value;
                         }
                     }
-                            
+
                     LegacyScrap = null;
                 }
 
@@ -1245,10 +1283,10 @@ namespace Oxide.Plugins
             => min == max ? min : UnityEngine.Random.Range(Math.Min(min, max), Math.Max(min, max));
         #endregion
 
-        #region Oxide Hooks
+        #region Oxide Loot Generation Hooks
         private object OnLootSpawn(LootContainer container)
         {
-            if ((!Initialized || container == null) || (CustomLootSpawns != null && CustomLootSpawns.Call<bool>("IsLootBox", container)))
+            if (!Initialized || container == null || !_config.Generic.WatchedPrefabs.TryGetValue(container.PrefabName, out bool enabled) || !enabled || (CustomLootSpawns != null && CustomLootSpawns.Call<bool>("IsLootBox", container)))
                 return null;
 
             if (PopulateContainer(container))
@@ -1258,7 +1296,7 @@ namespace Oxide.Plugins
         }
 
         NPCPlayerCorpse? OnCorpsePopulate(BasePlayer npcPlayer, NPCPlayerCorpse corpse)
-            => npcPlayer != null && corpse != null && _config.Generic.WatchedPrefabs.Contains(npcPlayer.PrefabName) && PopulateContainer(npcPlayer.PrefabName, corpse) ? corpse : null;
+            => npcPlayer != null && corpse != null && _config.Generic.WatchedPrefabs.TryGetValue(npcPlayer.PrefabName, out bool enabled) && enabled && PopulateContainer(npcPlayer.PrefabName, corpse) ? corpse : null;
         #endregion
 
         #region Loot Methods
@@ -1391,20 +1429,24 @@ namespace Oxide.Plugins
             bool modifiedLootTables = false;
 
             // OPTIMIZE
-            foreach (var lootPrefab in _config.Generic.WatchedPrefabs)
+            foreach (var lootPrefabEntry in _config.Generic.WatchedPrefabs) // Attempt to generate from prefab path and remove any invalid loot
             {
+                string lootPrefab = lootPrefabEntry.Key;
+                bool shouldBeEnabled = lootPrefabEntry.Value; // if false it will run and silent fail where it should generate loot, this is to ensure it is valid to the point where it needs to be unless it should be removed from the Watched Prefabs list.
+
                 // If prefab loot table is not currently present loaded from LootTables.json, generate it.
                 if (!lootTables.LootTables.ContainsKey(lootPrefab))
                 {
                     var basePrefab = GameManager.server.FindPrefab(lootPrefab);
+
                     if (basePrefab is null)
                     {
                         nullTablePrefabs.Add(lootPrefab);
                         continue;
-                    } 
-
-                    if (basePrefab.GetComponent<global::HumanNPC>() is global::HumanNPC npc)
-                    { // is npc
+                    }
+                    
+                    void PopulateNPCType(LootContainer.LootSpawnSlot[] spawnSlots)
+                    {
                         var container = new PrefabLoot();
 
                         container.Enabled = !lootPrefab.Contains("bradley_crate") && !lootPrefab.Contains("heli_crate");
@@ -1413,18 +1455,39 @@ namespace Oxide.Plugins
                         var slotItemCount = 0;
                         var itemList = new Dictionary<string, LootEntry>();
 
-                        foreach (var slot in npc.LootSpawnSlots)
+                        foreach (var slot in spawnSlots)
                         {
                             GetLootSpawn(slot.definition, ref itemList);
                             slotItemCount += slot.numberToSpawn;
                         }
 
                         container.ItemSettings.ItemsMin = container.ItemSettings.ItemsMax = slotItemCount;
+                        container.ItemSettings.MaxBPs = 1;
                         container.UngroupedItems = itemList;
 
                         lootTables.LootTables.Add(lootPrefab, container);
                         modifiedLootTables = true;
                     }
+
+                    if (basePrefab.GetComponent<global::HumanNPC>() is global::HumanNPC npc)
+                    { // is npc
+                        if (shouldBeEnabled)
+                            PopulateNPCType(npc.LootSpawnSlots);
+                    }
+#if OXIDE_PUBLICIZED
+                    else if (basePrefab.TryGetComponent<FSMComponent>(out var fsm) && fsm is Scientist2FSM or Scientist2FSM_Heavy or Scientist2FSM_Shotgun)
+                    {
+                        // Oxide publicizer takes care of this private field.
+                        if (shouldBeEnabled) {
+                            PopulateNPCType(fsm switch
+                            {
+                                Scientist2FSM a => a.dead.LootSpawnSlots,
+                                Scientist2FSM_Heavy b => b.dead.LootSpawnSlots,
+                                Scientist2FSM_Shotgun c => c.dead.LootSpawnSlots
+                            });
+                        }
+                    }
+#endif
                     else
                     { // is not npc
                         var loot = basePrefab.GetComponent<LootContainer>();
@@ -1474,12 +1537,13 @@ namespace Oxide.Plugins
             }
 
             // Some prefabs are loaded but not used (unloaded or invalid prefab)
-            if (nullTablePrefabs.Any() && _config.Generic.WatchedPrefabs.RemoveWhere(prefab => nullTablePrefabs.Contains(prefab)) is int missing && missing > 0)
+            if (nullTablePrefabs.Any() && _config.Generic.WatchedPrefabs.RemoveAll(nullTablePrefabs.Contains) is int missing && missing > 0)
             {
-                Puts($"Removed {missing} invalid / unloaded prefabs from watch list:\n{string.Join(", \n", nullTablePrefabs)}");
+                if (NewConfigGenerated)
+                    Puts($"Removed {missing} invalid / unloaded prefabs from watch list:\n{string.Join(", \n", nullTablePrefabs)}");
                 SaveConfig();
             }
-
+            
             Pool.FreeUnmanaged(ref nullTablePrefabs);
 
             // Write Changes
@@ -1588,18 +1652,17 @@ namespace Oxide.Plugins
                     scanEntry(bonusItem.Key, bonusItem.Value, lootProfile.Key, ref modifiedLootGroups);
             }
 
-
             // Build entries for loot tables
             int activeTypes = 0;
             foreach (var lootTable in lootTables.LootTables.ToList())
             {
                 var basePrefab = GameManager.server.FindPrefab(lootTable.Key);
                 
-                var npc = basePrefab?.GetComponent<global::HumanNPC>();
-                var loot = basePrefab?.GetComponent<LootContainer>();
-                var container = lootTable.Value;
-
-                if (npc is null && loot is null)
+                var npc = basePrefab?.HasComponent<global::HumanNPC>() ?? false;
+                var npc2 = basePrefab?.HasComponent<ScientistNPC2>() ?? false;
+                var loot = basePrefab?.HasComponent<LootContainer>() ?? false;
+                
+                if (!npc && !npc2 && !loot)
                 {
                     lootTables.LootTables.Remove(lootTable.Key);
                     Log($"Removed Invalid Loot Table {lootTable.Key}");
@@ -1607,6 +1670,8 @@ namespace Oxide.Plugins
 
                     continue;
                 }
+
+                var container = lootTable.Value;
 
                 #region pre-v4 Loot System
                 // This is the original plugin's loot system. It has not been touched aside from integrating loot profiles.
@@ -1680,7 +1745,7 @@ namespace Oxide.Plugins
 
             Log($"Using '{activeTypes}' active of '{lootTables.LootTables.Count}' supported container types");
         }
-        #endregion
+#endregion
 
         #region Core
         // NPC Implementation
