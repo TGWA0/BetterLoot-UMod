@@ -1,7 +1,0 @@
-v4.1.7 Naval Update Fixes
-
-- Added new deep sea NPCs
-- Added additional filter parameter for certain unloaded assets being caught in container list filter.
-- Changed container script to force update on load to add missing prefabs to maintain integrity of available choices.
-	- You can now selectively disable a prefab by setting its value in the config to false instead of removing the entire entry from the watch list.
-	- New prefabs found on wipe day will be automatically enabled.
