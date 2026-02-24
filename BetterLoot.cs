@@ -4,6 +4,7 @@ using Oxide.Core;
 using System.Data;
 using System.Linq;
 using UnityEngine;
+using Rust.Ai.Gen2;
 using Newtonsoft.Json;
 using Facepunch.Extend;
 using Oxide.Core.Plugins;
@@ -17,11 +18,10 @@ using System.Collections.Generic;
 using System.Runtime.Serialization;
 using System.Text.RegularExpressions;
 using Oxide.Plugins.BetterLootExtensions;
-using Rust.Ai.Gen2;
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.1.7")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.1.9")]
     [Description("A light loot container modification system with rarity support | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -774,9 +774,6 @@ namespace Oxide.Plugins
             [JsonProperty("Item Settings")]
             public ItemProperties ItemSettings;
 
-            [JsonIgnore]
-            public int ItemCount => GetTotalItemCount();
-
             public PrefabLoot()
             {
                 LootProfiles = new List<LootProfileImport>();
@@ -1295,7 +1292,7 @@ namespace Oxide.Plugins
             return null;
         }
 
-        NPCPlayerCorpse? OnCorpsePopulate(BasePlayer npcPlayer, NPCPlayerCorpse corpse)
+        LootableCorpse? OnCorpsePopulate(BaseEntity npcPlayer, LootableCorpse corpse)
             => npcPlayer != null && corpse != null && _config.Generic.WatchedPrefabs.TryGetValue(npcPlayer.PrefabName, out bool enabled) && enabled && PopulateContainer(npcPlayer.PrefabName, corpse) ? corpse : null;
         #endregion
 
@@ -1749,7 +1746,7 @@ namespace Oxide.Plugins
 
         #region Core
         // NPC Implementation
-        private bool PopulateContainer(string prefab, NPCPlayerCorpse npc)
+        private bool PopulateContainer(string prefab, LootableCorpse npc)
         {
             if (npc is null || npc.IsDestroyed || (!(npc.containers?.Any() ?? false)) || npc.containers[0] is not ItemContainer inventory)
                 return false;
@@ -1780,11 +1777,8 @@ namespace Oxide.Plugins
             if (container is null || prefab is null || !(lootTables?.LootTables?.TryGetValue(prefab, out PrefabLoot? con) ?? false) || con is null || !con.Enabled)
                 return false;
 
-            int lootItemCount = con.ItemCount;
             int min = con.ItemSettings.ItemsMin, max = con.ItemSettings.ItemsMax;
-            int itemCount = GetRNG(Math.Min(min, max), Math.Max(min, max));
-            if (lootItemCount > 0 && itemCount > lootItemCount && lootItemCount < 36)
-                itemCount = lootItemCount;
+            int itemCount = Math.Clamp(GetRNG(Math.Min(min, max), Math.Max(min, max)), 1, 36);
 
             container.Clear();
             container.capacity = 36;
@@ -1863,16 +1857,18 @@ namespace Oxide.Plugins
                 }
 
                 // Duplicate checking
-                var duplicatePredicate = (Item item, bool bonusItem) => 
-                    ((isLootGroupItem && !_config.LootGroupsConfig.AllowLootGroupDuplicateItems) || (!bonusItem && !_config.Loot.AllowDuplicateItems) || (bonusItem && !_config.Loot.AllowBonusItemsDuplicateItems)) && (itemNames.Contains(item.info.shortname) || (item.IsBlueprint() && itemBlueprints.Contains(item.blueprintTarget)));
+                var duplicatePredicate = (Item item, bool bonusItem) =>
+                    ((isLootGroupItem && !_config.LootGroupsConfig.AllowLootGroupDuplicateItems) || (!bonusItem && !_config.Loot.AllowDuplicateItems) || (bonusItem && !_config.Loot.AllowBonusItemsDuplicateItems)) && ((itemNames.Contains(item.info.shortname) || (item.IsBlueprint() && itemBlueprints.Contains(item.blueprintTarget))));
 
-                if (duplicatePredicate(item, false)) {
+                if (duplicatePredicate(item, false))
+                {
                     item.Remove();
                     --maxRetry;
                     --i;
                     continue;
                 }
-                else if (item.IsBlueprint())
+
+                if (item.IsBlueprint())
                 {
                     itemBlueprints.Add(item.blueprintTarget);
                 }
@@ -1934,7 +1930,7 @@ namespace Oxide.Plugins
             if (scrapAmt > 0)
             {
                 Item item = ItemManager.CreateByItemID(-932201673, scrapAmt * _config.Loot.ScrapMultiplier); // Scrap item ID
-                if (!item.MoveToContainer(container, -1, false))
+                if (!item.MoveToContainer(container))
                     item.DoRemove();
             }
 
@@ -1969,7 +1965,7 @@ namespace Oxide.Plugins
                 if (_config.Generic.RemoveStackedContainers)
                     FixLoot();
 
-                foreach (var container in BaseNetworkable.serverEntities.Where(p => p is (not null) and LootContainer or NPCPlayerCorpse))
+                foreach (var container in BaseNetworkable.serverEntities.Where(p => p is (not null) and LootContainer or LootableCorpse))
                 {
                     // API Check
                     if (container is LootContainer lootContainer)
@@ -2426,7 +2422,7 @@ namespace Oxide.Plugins
             string panelName = string.Empty;
             bool isNpc = false;
 
-            if (entity is NPCPlayerCorpse npc)
+            if (entity is LootableCorpse npc)
             {
                 _instance.SendMessage(player, "Cannot rotate loot directly on corpse.");
                 return;
