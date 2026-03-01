@@ -21,7 +21,7 @@ using Oxide.Plugins.BetterLootExtensions;
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.1.9")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.1.10")]
     [Description("A light loot container modification system with rarity support | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -950,6 +950,9 @@ namespace Oxide.Plugins
 
                 entry.Value.Amount.ApplyAttachments(item);
                 entry.Value.Amount.ApplyAmmo(item);
+
+                if (entry.Value.Amount.DurabilitySettings is LootEntryDurability durability)
+                    item.ChangeConditionPercentage(GetRNG(durability.MinDurability, durability.MaxDurability));
 
                 item.MarkDirty();
 
