@@ -10,19 +10,19 @@ using Facepunch.Extend;
 using Oxide.Core.Plugins;
 using System.Collections;
 using Newtonsoft.Json.Linq;
+using System.Globalization;
 using static ConsoleSystem;
 using Pool = Facepunch.Pool;
 using UnityEngine.Networking;
 using Random = System.Random;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Runtime.Serialization;
 using System.Text.RegularExpressions;
 using Oxide.Plugins.BetterLootExtensions;
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.2.1")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.2.2")]
     [Description("A light loot container modification system with rarity support | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -817,6 +817,8 @@ namespace Oxide.Plugins
         #endregion
 
         #region Loot Classes
+        public record ItemConvertInfo(Item Item, bool CanBeBp);
+        
         /// <summary>
         /// Prefab Loot system will be contained in a list. This is the new loot class for loot containers that will
         /// allow the import of custom loot groups allowing for RNG on groups as well as individual items
@@ -1013,7 +1015,7 @@ namespace Oxide.Plugins
             /// <summary>
             /// Get a random item from this loot group based off of items probabilities
             /// </summary>
-            public (Item?, List<Item>?) GetItem(HashSet<string> currentItemEntries)
+            public (ItemConvertInfo?, List<ItemConvertInfo>?) GetItem(HashSet<string> currentItemEntries)
             {
                 int itemIndex = GetRandomIndex();
 
@@ -1021,7 +1023,7 @@ namespace Oxide.Plugins
                 if (itemIndex >= ItemList.Count)
                     return (null, null);
 
-                List<Item> bonusItems = new List<Item>();
+                List<ItemConvertInfo> bonusItems = new List<ItemConvertInfo>();
 
                 var entry = ItemList.ElementAt(itemIndex);
 
@@ -1070,7 +1072,7 @@ namespace Oxide.Plugins
                 // Add for future duplicate checking.
                 currentItemEntries.Add(entry.Key);
 
-                return (item, bonusItems);
+                return (new ItemConvertInfo(item, entry.Value.Amount.CanConvertToBlueprint ?? false), bonusItems);
             }
             #endregion
         }
@@ -1362,13 +1364,13 @@ namespace Oxide.Plugins
                 this.Max = Max;
             }
 
-            public void CreateBonusItems(ref List<Item>? bonusItems)
+            public void CreateBonusItems(ref List<ItemConvertInfo>? bonusItems)
             {
                 if (!(additionalItems?.Count > 0))
                     return;
 
                 if (bonusItems is null)
-                    bonusItems = new List<Item>();
+                    bonusItems = new List<ItemConvertInfo>();
 
                 foreach (var bonusItemEntry in additionalItems)
                 {
@@ -1384,7 +1386,7 @@ namespace Oxide.Plugins
                         bonusItem.ChangeConditionPercentage(GetRNG(_bonusItemEntry.DurabilitySettings.MinDurability, _bonusItemEntry.DurabilitySettings.MaxDurability));
 
                     bonusItem.OnVirginSpawn();
-                    bonusItems.Add(bonusItem);
+                    bonusItems.Add(new ItemConvertInfo(bonusItem, bonusItemEntry.Value.CanConvertToBlueprint ?? false));
                 }
             }
         }
@@ -1995,7 +1997,7 @@ namespace Oxide.Plugins
         #region Container Population Boiler
         private bool PopulateContainer(string prefab, LootableCorpse npc)
         {
-            if (npc is null || npc.IsDestroyed || (!(npc.containers?.Any() ?? false)) || npc.containers[0] is not ItemContainer inventory)
+            if (npc is null || npc.IsDestroyed || npc.containers?.Length == 0 || npc.containers[0] is not ItemContainer inventory)
                 return false;
 
             // API Call
@@ -2052,13 +2054,12 @@ namespace Oxide.Plugins
             bool allowDupes = _config.Loot.AllowDuplicateItems;
             bool allowGroupDupes = _config.LootGroupsConfig.AllowLootGroupDuplicateItems;
             bool allowBonusDupes = _config.Loot.AllowBonusItemsDuplicateItems;
-            var lootProfiles = con.LootProfiles;
 
-            using PooledList<string> itemNames = Pool.Get<PooledList<string>>(); // Curent item shortnames
+            using PooledList<string> itemNames = Pool.Get<PooledList<string>>(); // Current item shortnames
             if (itemNames.Capacity < itemCount)
                 itemNames.Capacity = itemCount;
 
-            using PooledList<Item> items = Pool.Get<PooledList<Item>>();
+            using PooledList<ItemConvertInfo> items = Pool.Get<PooledList<ItemConvertInfo>>();
             if (items.Capacity < itemCount + 5) // +5 for guaranteed items buffer
                 items.Capacity = itemCount + 5;
 
@@ -2074,8 +2075,8 @@ namespace Oxide.Plugins
             int maxRetry = 10;
             for (int i = 0; i < itemCount; ++i)
             {
-                Item? item = null;
-                List<Item>? bonusItems = null;
+                ItemConvertInfo? itemInfo = null;
+                List<ItemConvertInfo>? bonusItemInfo = null;
                 List<KeyValuePair<string, LootEntrySettings>> _guaranteedItemEntries = Pool.Get<List<KeyValuePair<string, LootEntrySettings>>>();
 
                 bool isLootGroupItem = false;
@@ -2085,9 +2086,9 @@ namespace Oxide.Plugins
                         profile.UpdateProbabilities(profile.ItemList.Select(x => x.Value.Probability));
 
                     // Get item
-                    (item, bonusItems) = profile.GetItem(currentItemEntries);
+                    (itemInfo, bonusItemInfo) = profile.GetItem(currentItemEntries);
 
-                    if (item != null)
+                    if (itemInfo?.Item is not null)
                     {
                         // Add all guarenteed items from profile (if profile selected use all items regardless)
                         _guaranteedItemEntries.AddRange(profile.GuaranteedItems);
@@ -2098,8 +2099,8 @@ namespace Oxide.Plugins
                 // Loot import not used, generate from ungrouped items with default rng system
                 try
                 {
-                    if (item == null)
-                        (item, bonusItems) = MightyRNG(con, currentItemEntries, prefab, itemCount, itemBlueprints.Count >= con.ItemSettings.MaxBlueprints);
+                    if (itemInfo?.Item is null)
+                        (itemInfo, bonusItemInfo) = MightyRNG(con, currentItemEntries, prefab, itemCount, itemBlueprints.Count >= con.ItemSettings.MaxBlueprints);
                 }
                 catch (Exception e)
                 {
@@ -2107,7 +2108,7 @@ namespace Oxide.Plugins
                 }
 
                 // No item was generated from either system, attempt to regenerate.
-                if (item == null)
+                if (itemInfo?.Item is null)
                 {
                     if (--maxRetry <= 0)
                         break;
@@ -2120,9 +2121,9 @@ namespace Oxide.Plugins
                 bool duplicatePredicate(Item item, bool bonusItem) =>
                     ((isLootGroupItem && !allowGroupDupes) || (bonusItem && !allowBonusDupes) || (!bonusItem && !allowDupes)) && ((itemNames.Contains(item.info.shortname) || (item.IsBlueprint() && itemBlueprints.Contains(item.blueprintTarget))));
 
-                if (duplicatePredicate(item, false))
+                if (duplicatePredicate(itemInfo.Item, false))
                 {
-                    item.Remove();
+                    itemInfo.Item.Remove();
                     if (--maxRetry <= 0)
                         break;
 
@@ -2130,30 +2131,30 @@ namespace Oxide.Plugins
                     continue;
                 }
 
-                if (item.IsBlueprint())
+                if (itemInfo.Item.IsBlueprint())
                 {
-                    itemBlueprints.Add(item.blueprintTarget);
+                    itemBlueprints.Add(itemInfo.Item.blueprintTarget);
                 }
                 else
                 {
-                    itemNames.Add(item.info.shortname);
+                    itemNames.Add(itemInfo.Item.info.shortname);
                 }
 
-                if (storedBlacklist.ItemList.Contains(item.info.shortname))
+                if (storedBlacklist.ItemList.Contains(itemInfo.Item.info.shortname))
                 {
-                    item.Remove(); // broken item fix
+                    itemInfo.Item.Remove(); // broken item fix
                     continue;
                 }
 
-                items.Add(item);
+                items.Add(itemInfo);
 
                 //Only if bonus items are present
-                if (bonusItems is not null)
+                if (bonusItemInfo is not null)
                 {
-                    foreach (Item bonusItem in bonusItems)
+                    foreach (ItemConvertInfo bonusItem in bonusItemInfo)
                     {
-                        if (duplicatePredicate(bonusItem, true))
-                            item.Remove();
+                        if (duplicatePredicate(bonusItem.Item, true))
+                            bonusItem.Item.Remove();
                         else
                         {
                             items.Add(bonusItem);
@@ -2192,7 +2193,7 @@ namespace Oxide.Plugins
                 if (gItemEntry.Value.DurabilitySettings is LootEntryDurability durability)
                     gItem.ChangeConditionPercentage(GetRNG(durability.MinDurability, durability.MaxDurability));
 
-                items.Add(gItem);
+                items.Add(new ItemConvertInfo(gItem, gItemEntry.Value.CanConvertToBlueprint ?? false));
             }
 
             int scrapAmt = 0;
@@ -2212,7 +2213,7 @@ namespace Oxide.Plugins
 
             // Add scrap
             if (scrapAmt > 0)
-                items.Add(ItemManager.CreateByItemID(-932201673, scrapAmt * _config.Loot.ScrapMultiplier)); // Scrap item ID
+                items.Add(new ItemConvertInfo(ItemManager.CreateByItemID(-932201673, scrapAmt * _config.Loot.ScrapMultiplier), false)); // Scrap item ID
 
             // Blueprint conversion pass
             if (_config.Loot.EnableBlueprintConversion && con.ItemSettings.MaxBlueprints > 0)
@@ -2225,40 +2226,22 @@ namespace Oxide.Plugins
                     
                     if (currentBPCount < targetBPCount)
                     {
-                        if (BlueprintBaseDef != null)
+                        if (BlueprintBaseDef is not null)
                         {
                             using PooledList<int> eligibleItemIndices = Pool.Get<PooledList<int>>();
                             for (int i = 0; i < items.Count; i++)
                             {
-                                Item itm = items[i];
-                                if (itm == null || itm.IsBlueprint())
+                                ItemConvertInfo itemEntry = items[i];
+                                if (itemEntry is null || itemEntry.Item.IsBlueprint())
                                     continue;
 
-                                ItemDefinition def = itm.info;
-                                if (def?.Blueprint == null || !def.Blueprint.isResearchable)
+                                ItemDefinition def = itemEntry.Item.info;
+                                if (def?.Blueprint is null || !def.Blueprint.isResearchable)
                                     continue;
 
                                 string itemShortname = def.shortname;
-                                LootEntrySettings? entrySettings = null;
-
-                                if (con.UngroupedItems.TryGetValue(itemShortname, out LootEntry? entry))
-                                    entrySettings = entry;
-                                else
-                                {
-                                    foreach (var kvp in con.UngroupedItems)
-                                    {
-                                        string key = UniqueTagREGEX.Replace(kvp.Key, string.Empty);
-                                        if (key.Equals(itemShortname, StringComparison.OrdinalIgnoreCase))
-                                        {
-                                            entrySettings = kvp.Value;
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                if (entrySettings is null)
-                                    Log($"Error: Could not fetch item entry settings for \"{itemShortname}\" in prefab {prefab}.");
-                                else if (entrySettings.CanConvertToBlueprint ?? false)
+                                
+                                if (itemEntry.CanBeBp)
                                     eligibleItemIndices.Add(i);
                             }
 
@@ -2266,9 +2249,9 @@ namespace Oxide.Plugins
                             {
                                 int randomIdx = GetRNG(0, eligibleItemIndices.Count - 1);
                                 int itemIdx = eligibleItemIndices[randomIdx];
-                                Item originalItem = items[itemIdx];
+                                ItemConvertInfo originalItem = items[itemIdx];
 
-                                int blueprintTarget = originalItem.info.itemid;
+                                int blueprintTarget = originalItem.Item.info.itemid;
 
                                 bool hasDuplicateBP = !_config.Loot.AllowDuplicateBlueprints && itemBlueprints.Contains(blueprintTarget);
                                 if (hasDuplicateBP)
@@ -2280,8 +2263,8 @@ namespace Oxide.Plugins
                                 Item blueprint = ItemManager.Create(BlueprintBaseDef);
                                 blueprint.blueprintTarget = blueprintTarget;
 
-                                originalItem.Remove();
-                                items[itemIdx] = blueprint;
+                                originalItem.Item.Remove();
+                                items[itemIdx] = new ItemConvertInfo(blueprint, false);
                                 itemBlueprints.Add(blueprintTarget);
 
                                 currentBPCount++;
@@ -2293,9 +2276,9 @@ namespace Oxide.Plugins
             }
 
             items.Shuffle((uint)UnityEngine.Random.Range(0, 100));
-            foreach (var item in items.Where(x => x != null && x.IsValid()))
-                if (!item.MoveToContainer(container)) // broken item fix / fixes full container
-                    item.DoRemove();
+            foreach (var item in items.Where(entry => entry is not null && entry.Item.IsValid()))
+                if (!item.Item.MoveToContainer(container)) // broken item fix / fixes full container
+                    item.Item.DoRemove();
 
             container.capacity = container.itemList.Count;
             container.MarkDirty();
@@ -2318,7 +2301,7 @@ namespace Oxide.Plugins
 
             // Pre kill crate markers to avoid spam. 
             var crates = Pool.Get<PooledList<HackableLockedCrate>>();
-            crates.AddRange(BaseNetworkable.serverEntities.OfType<HackableLockedCrate>().Where(c => !ReferenceEquals(c.mapMarkerInstance, null) && !c.mapMarkerInstance.IsDestroyed));
+            crates.AddRange(BaseNetworkable.serverEntities.OfType<HackableLockedCrate>().Where(c => c is { IsDestroyed: false, mapMarkerInstance: { IsDestroyed: false } }));
             foreach (var crate in crates)
                 crate.mapMarkerInstance.Kill();
 
@@ -2337,14 +2320,16 @@ namespace Oxide.Plugins
                     {
                         if (APICheck((BaseEntity)container))
                             continue;
-                        else if (PopulateContainer(lootContainer))
+                        
+                        if (PopulateContainer(lootContainer))
                             populatedContainers++;
                     }
                     else if (container.GetComponent<LootFill>() is LootFill lf)
                     {
                         if (APICheck((BaseEntity)container))
                             continue;
-                        else if (PopulateContainer(lf))
+                        
+                        if (PopulateContainer(lf))
                             populatedContainers++;
                     }
                 }
@@ -2357,8 +2342,9 @@ namespace Oxide.Plugins
 
                 // Add crate markers back to those that had it
                 foreach (var crate in crates)
-                    crate.CreateMapMarker(120);
-
+                    if (crate is { IsDestroyed: false })
+                        crate.CreateMapMarker(120);
+                
                 if (crates.Count > 0)
                     Puts($"Restored {crates.Count} crate markers.");
 
@@ -2420,10 +2406,10 @@ namespace Oxide.Plugins
                 Log($"No stacked LootContainer found.");
         }
 
-        private (Item? item, List<Item>? bonusItem) MightyRNG(PrefabLoot entry, HashSet<string> currentItemEntries, string type, int itemCount, bool blockBPs = false)
+        private (ItemConvertInfo? item, List<ItemConvertInfo>? bonusItem) MightyRNG(PrefabLoot entry, HashSet<string> currentItemEntries, string type, int itemCount, bool blockBPs = false)
         {
             List<string>? selectFrom = Pool.Get<List<string>>();
-            List<Item>? bonusItems = null;
+            List<ItemConvertInfo>? bonusItems = null;
             LootEntry? lootEntry = null;
             Item? item;
 
@@ -2499,7 +2485,7 @@ namespace Oxide.Plugins
                 string itemShortname = UniqueTagREGEX.Replace(itemEntryName, string.Empty);  // Remove tag
                 ItemDefinition itemDef = ItemManager.FindItemDefinition(itemShortname);
 
-                if (asBP && itemDef.Blueprint != null && itemDef.Blueprint.isResearchable)
+                if (asBP && itemDef.Blueprint is not null && itemDef.Blueprint.isResearchable)
                 {
                     item = ItemManager.Create(BlueprintBaseDef);
                     item.blueprintTarget = itemDef.itemid;
@@ -2509,7 +2495,7 @@ namespace Oxide.Plugins
                     item = ItemManager.CreateByName(itemShortname);
                 }
 
-                if (item is null || item.info is null)
+                if (item?.info is null)
                 {
                     if (--maxRetry <= 0)
                         break;
@@ -2553,7 +2539,7 @@ namespace Oxide.Plugins
             currentItemEntries.Add(itemEntryName);
 
             item.OnVirginSpawn();
-            return (item, bonusItems);
+            return (new ItemConvertInfo(item, lootEntry.CanConvertToBlueprint ?? false), bonusItems);
         }
 
         private bool ItemExists(string name) =>
