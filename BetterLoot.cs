@@ -9,20 +9,20 @@ using Newtonsoft.Json;
 using Facepunch.Extend;
 using Oxide.Core.Plugins;
 using System.Collections;
+using System.Globalization;
 using Newtonsoft.Json.Linq;
 using static ConsoleSystem;
 using Pool = Facepunch.Pool;
 using UnityEngine.Networking;
 using Random = System.Random;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Runtime.Serialization;
 using System.Text.RegularExpressions;
 using Oxide.Plugins.BetterLootExtensions;
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.2.4")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.2.5")]
     [Description("A light loot container modification system with rarity support | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -49,13 +49,14 @@ namespace Oxide.Plugins
         private Dictionary<string, int[]> BlueprintWeights = new Dictionary<string, int[]>(); // Blueprint weights for each container
         private Dictionary<string, int> TotalItemWeights = new Dictionary<string, int>(); // Total sum of item weights for each container
         private Dictionary<string, int> TotalBlueprintWeights = new Dictionary<string, int>(); // Total sum of blueprint weights for each container
-
+        
         #region Info Caching
         private Dictionary<string, WI_Cache>? WeaponInfoCache; // Item info for building table 
         private Dictionary<string, ItemSlot>? WeaponModInfoCache; // Weapon mod shortname to enum mapping.
         private List<string>? DurabilityItems;  // Items that need the durability property 
         private static ItemDefinition? BlueprintBaseDef;
-
+        private List<string> ItemManagerItemNamesList = new List<string>();
+        
         /// <summary>
         /// Info for each weapon type item
         /// Contains info for building config data for if a item is a weapon (it will be in this dict) as well as how many mods and how much ammo it is allowed to have.
@@ -383,7 +384,7 @@ namespace Oxide.Plugins
             _instance = this;
             RNG = new Random();
             UniqueTagREGEX = new Regex(@"\{\d+\}", RegexOptions.Compiled);
-
+            
             DataSystem.LoadBlacklist();
             DataSystem.LoadLootTables();
             DataSystem.LoadLootGroups();
@@ -1069,27 +1070,12 @@ namespace Oxide.Plugins
 
                 entry.Value.Amount.CreateBonusItems(ref bonusItems);
 
-                // Select Amount
-                int amount = GetRNG(entry.Value.Amount.Min, entry.Value.Amount.Max);
-
-                // Get Custom Properties
-                ulong skinId = entry.Value.Amount.SkinId;
-                string? customName = entry.Value.Amount.DisplayName;
-
                 // Create Item
                 string sanitizedName = UniqueTagREGEX.Replace(entry.Key, string.Empty);
-                Item item = ItemManager.CreateByPartialName(sanitizedName, amount);
-                if (!string.IsNullOrWhiteSpace(customName))
-                    item.name = customName;
-                item.skin = skinId;
-
-                entry.Value.Amount.ApplyAttachments(item);
-                entry.Value.Amount.ApplyAmmo(item);
-
-                if (entry.Value.Amount.DurabilitySettings is LootEntryDurability durability)
-                    item.ChangeConditionPercentage(GetRNG(durability.MinDurability, durability.MaxDurability));
-
-                item.MarkDirty();
+                Item item = ItemManager.CreateByPartialName(sanitizedName, GetRNG(entry.Value.Amount.Min, entry.Value.Amount.Max), entry.Value.Amount.SkinId);
+                
+                // Apply custom properties
+                entry.Value.Amount.ApplyAllProperties(item);
 
                 if (item is null)
                     Log($"ERROR: item \"{entry.Key}\" could not be created! System returned null entry!");
@@ -1127,6 +1113,20 @@ namespace Oxide.Plugins
             [JsonProperty("Item Properties", NullValueHandling = NullValueHandling.Ignore)]
             public ItemEntrySettings? ItemEntryModifications;
 
+            public void ApplyAllProperties(Item item)
+            {
+                ApplyAmmo(item);
+                ApplyAttachments(item);
+                
+                if (!string.IsNullOrWhiteSpace(DisplayName))
+                    item.name = DisplayName;
+                
+                if (DurabilitySettings is {})
+                    item.ChangeConditionPercentage(GetRNG(DurabilitySettings.MinDurability, DurabilitySettings.MaxDurability));
+                
+                item.MarkDirty();
+            }
+            
             public void ApplyAttachments(Item item)
             {
                 // No mods to apply
@@ -1400,15 +1400,12 @@ namespace Oxide.Plugins
                 foreach (var bonusItemEntry in additionalItems)
                 {
                     var _bonusItemEntry = bonusItemEntry.Value;
-                    Item bonusItem = ItemManager.CreateByName(bonusItemEntry.Key, GetRNG(_bonusItemEntry.Min, _bonusItemEntry.Max) * _config.Loot.LootMultiplier, _bonusItemEntry.SkinId);
-
-                    // Apply attachments if applicable
-                    _bonusItemEntry.ApplyAttachments(bonusItem);
-                    _bonusItemEntry.ApplyAmmo(bonusItem);
-
-                    // Apply durability
-                    if (_bonusItemEntry.DurabilitySettings is not null)
-                        bonusItem.ChangeConditionPercentage(GetRNG(_bonusItemEntry.DurabilitySettings.MinDurability, _bonusItemEntry.DurabilitySettings.MaxDurability));
+                    Item bonusItem = ItemManager.CreateByName(UniqueTagREGEX.Replace(bonusItemEntry.Key, string.Empty), GetRNG(_bonusItemEntry.Min, _bonusItemEntry.Max) * _config.Loot.LootMultiplier, _bonusItemEntry.SkinId);
+                    
+                    if (bonusItem is null)
+                        continue;
+                    
+                    _bonusItemEntry.ApplyAllProperties(bonusItem);
 
                     bonusItem.OnVirginSpawn();
                     bonusItems.Add(new ItemConvertInfo(bonusItem, _bonusItemEntry.CanConvertToBlueprint ?? false));
@@ -1630,7 +1627,7 @@ namespace Oxide.Plugins
                 }
             }
         }
-
+        
         private void LoadAllContainers()
         {
             var nullTablePrefabs = Pool.Get<List<string>>();
@@ -1803,17 +1800,26 @@ namespace Oxide.Plugins
                 LootGroupsData.TryCreateExampleGroup();
                 DataSystem.SaveLootTables();
             }
-
+            
+            ItemManagerItemNamesList.Capacity = ItemManager.itemList.Count;
+            ItemManagerItemNamesList = ItemManager.itemList.Select(id => id.shortname).ToList();
             modifiedLootTables = false;
 
             void scanEntry(string itemKey, LootEntrySettings itemEntry, string lootTableKey, ref bool modificationFlag)
             {
                 var defName = UniqueTagREGEX.Replace(itemKey, string.Empty);
+                
+                // Warning
+                if (!ItemManagerItemNamesList.Contains(defName, StringComparer.OrdinalIgnoreCase))
+                {
+                    Puts($"Error: Item named \"{defName}\" in table of \"{lootTableKey}\" doesnt exist. Item will not generate! Please check naming!");
+                    return;
+                }
 
                 if (!itemKey.EndsWith(".blueprint", StringComparison.OrdinalIgnoreCase))
                 {
                     // Validate the blueprint conversion property
-                    bool canBeBlueprint = ItemManager.FindItemDefinition(defName) is ItemDefinition def && (def.Blueprint?.isResearchable ?? false);
+                    bool canBeBlueprint = ItemManager.FindItemDefinition(defName) is { } def && (def.Blueprint?.isResearchable ?? false);
                     if (itemEntry.CanConvertToBlueprint is null)
                     {
                         if (canBeBlueprint)
@@ -1823,7 +1829,7 @@ namespace Oxide.Plugins
                         itemEntry.CanConvertToBlueprint = null; // Entry should be allowed to have blueprint in first place.
                 }
                 
-                // Check if needs durability
+                // Check if it needs durability
                 if (DurabilityItems.Contains(itemKey))
                 {
                     if (itemEntry.DurabilitySettings is null)
@@ -1899,7 +1905,7 @@ namespace Oxide.Plugins
 
                 modificationFlag = true;
             }
-
+            
             // Build entries for loot groups
             bool modifiedLootGroups = false;
             foreach (var lootProfile in lootGroups.LootGroups.ToList())
@@ -2003,6 +2009,8 @@ namespace Oxide.Plugins
                 }
                 #endregion
             }
+            
+            ItemManagerItemNamesList.Clear();
 
             if (modifiedLootTables)
                 DataSystem.SaveLootTables();
@@ -2243,13 +2251,13 @@ namespace Oxide.Plugins
             foreach (var gItemEntry in guaranteedItemEntries)
             {
                 // Spawn item. No rng, just spawn em.
-                Item gItem = ItemManager.CreateByPartialName(gItemEntry.Key, GetRNG(gItemEntry.Value.Min, gItemEntry.Value.Max), gItemEntry.Value.SkinId);
+                Item gItem = ItemManager.CreateByName(UniqueTagREGEX.Replace(gItemEntry.Key, string.Empty), GetRNG(gItemEntry.Value.Min, gItemEntry.Value.Max), gItemEntry.Value.SkinId);
+                
                 if (gItem is null)
                     continue;
 
-                if (gItemEntry.Value.DurabilitySettings is {} durability)
-                    gItem.ChangeConditionPercentage(GetRNG(durability.MinDurability, durability.MaxDurability));
-
+                gItemEntry.Value.ApplyAllProperties(gItem);
+                
                 items.Add(new (gItem, gItemEntry.Value.CanConvertToBlueprint ?? false));
             }
 
@@ -2482,28 +2490,20 @@ namespace Oxide.Plugins
             if (item is null)
                 return default;
 
-            // Apply custom properties
+            #region Apply custom properties
             item.amount = GetRNG(lootEntry.Min, lootEntry.Max) * _config.Loot.LootMultiplier;
             item.skin = lootEntry.SkinId;
 
-            if (!string.IsNullOrWhiteSpace(lootEntry.DisplayName))
-                item.name = lootEntry.DisplayName;
-
-            lootEntry?.ApplyAttachments(item); // Apply attachments to main item
-            lootEntry?.ApplyAmmo(item);
-            lootEntry?.CreateBonusItems(ref bonusItems); // Create bonus items and apply attachments
-
-            // Apply durability
-            if (lootEntry?.DurabilitySettings is {} durabilitySettings)
-                item.ChangeConditionPercentage(GetRNG(durabilitySettings.MinDurability, durabilitySettings.MaxDurability));
-            else
-                item.MarkDirty();
-
+            lootEntry.ApplyAllProperties(item);
+            #endregion
+            
+            lootEntry.CreateBonusItems(ref bonusItems); // Create bonus items and apply attachments
+            
             // Add for future duplicate checking.
             currentItemEntries.Add(selectedEntry.Key);
-
+            
             item.OnVirginSpawn();
-            return (new ItemConvertInfo(item, lootEntry?.CanConvertToBlueprint ?? false), bonusItems);
+            return (new ItemConvertInfo(item, lootEntry.CanConvertToBlueprint ?? false), bonusItems);
         }
         
         /// <summary>
@@ -2632,18 +2632,8 @@ namespace Oxide.Plugins
             item.amount = GetRNG(lootEntry.Min, lootEntry.Max) * _config.Loot.LootMultiplier;
             item.skin = lootEntry.SkinId;
 
-            if (!string.IsNullOrWhiteSpace(lootEntry.DisplayName))
-                item.name = lootEntry.DisplayName;
-
-            lootEntry?.ApplyAttachments(item); // Apply attachments to main item
-            lootEntry?.ApplyAmmo(item);
-            lootEntry?.CreateBonusItems(ref bonusItems); // Create bonus items and apply attachments
-
-            // Apply durability
-            if (lootEntry?.DurabilitySettings is {} durabilitySettings)
-                item.ChangeConditionPercentage(GetRNG(durabilitySettings.MinDurability, durabilitySettings.MaxDurability));
-            else
-                item.MarkDirty();
+            lootEntry.ApplyAllProperties(item);
+            lootEntry.CreateBonusItems(ref bonusItems); // Create bonus items and apply attachments
 
             // Add for future duplicate checking.
             currentItemEntries.Add(itemEntryName);
@@ -2652,8 +2642,9 @@ namespace Oxide.Plugins
             return (new ItemConvertInfo(item, lootEntry.CanConvertToBlueprint ?? false), bonusItems);
         }
 
-        private bool ItemExists(string name) =>
-            ItemManager.itemList.Any(x => x.shortname == name);
+        
+        private bool ItemExists(string name)
+            => ItemManager.itemList.Any(id => id.shortname.Equals(name,  StringComparison.OrdinalIgnoreCase));
 
         // API
         private bool isSupplyDropActive()
